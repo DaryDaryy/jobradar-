@@ -48,9 +48,10 @@ function useGmail() {
   const [userEmail, setUserEmail] = useState(null);
 
   const login = useCallback(() => {
+    const redirectUri = "https://darydaryy.github.io/jobradar-/";
     const params = new URLSearchParams({
       client_id: CLIENT_ID,
-      redirect_uri: window.location.origin + window.location.pathname,
+      redirect_uri: redirectUri,
       response_type: "token",
       scope: GMAIL_SCOPE,
       prompt: "consent",
