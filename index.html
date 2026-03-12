@@ -143,33 +143,35 @@ English: B2/C1. Location: Yerevan, Armenia. Open to: remote international roles.
 Uploaded: ${names}`;
 }
 
-async function searchJobs(resumeText, type) {
+async function searchJobs(resumeText, type, excludedCompanies = []) {
   const typeLabel = type === "product_manager" ? "Product Manager" : "Project Manager";
-  const companiesPM = "Miro, Figma, Linear, Loom, Hotjar, Typeform, Contentful, Intercom, Prezly, Doist, Buffer, Help Scout, Airtable, Notion, Coda, Pitch";
-  const companiesPJM = "GitLab, Automattic, Doist, Remote.com, Deel, Toggl, Basecamp, Zapier, InVision, Clubhouse, Productboard, monday.com, Asana, ClickUp";
-  const companies = type === "product_manager" ? companiesPM : companiesPJM;
+  const excludeStr = excludedCompanies.length > 0
+    ? `EXCLUDE_COMPANIES:[${excludedCompanies.join(",")}] `
+    : "";
+  const today = new Date().toISOString().slice(0,10);
 
   const text = await callGemini(
     "You are a job search assistant. Respond ONLY with a valid JSON array. No markdown, no backticks, no text outside the array.",
-    `Generate exactly 8 unique remote ${typeLabel} job openings at real international tech companies for this candidate.
+    `${excludeStr}Find 8 remote ${typeLabel} jobs for this candidate. ${excludedCompanies.length > 0 ? "Do NOT include companies already shown: " + excludedCompanies.join(", ") + "." : ""}
 
-Candidate profile:
-${resumeText}
+Candidate: ${resumeText}
 
-Use companies from this list (pick 8 different ones): ${companies}
+Return ONLY JSON array, no markdown, no backticks:
+[{"id":"1","company":"Miro","role":"Senior ${typeLabel}","type":"${type}","location":"Remote (Europe)","description":"2 sentence description.","email":"jobs@miro.com","url":"https://miro.com/careers/","matchScore":88,"matchReason":"Why this matches Daria","postedDate":"${today}"}]
 
-Return ONLY a JSON array (no markdown, no backticks):
-[{"id":"pm1","company":"Miro","role":"Senior Product Manager","location":"Remote (Europe)","description":"Own the core collaboration canvas product used by 50M+ users. Drive roadmap from discovery to launch working with distributed engineering teams.","email":"jobs@miro.com","url":"https://miro.com/careers/","matchScore":92,"matchReason":"Matches Daria's SaaS PM experience and Figma/collaboration tools background"}]
-
-Rules: matchScore 70-95, descriptions 2 sentences, all unique companies, type="${type}"`
+Rules: 8 unique companies NOT in excluded list, type="${type}" for all, matchScore 70-95, postedDate in YYYY-MM-DD format.`
   );
 
   const match = text.match(/\[[\s\S]*\]/);
   if (!match) throw new Error("Не удалось получить вакансии от AI");
-  const jobs = JSON.parse(match[0]);
-  // deduplicate by company
-  const seen = new Set();
-  return jobs.filter(j => { if (seen.has(j.company)) return false; seen.add(j.company); return true; });
+  const parsed = JSON.parse(match[0]);
+  const seen = new Set(excludedCompanies.map(c => c.toLowerCase()));
+  return parsed.filter(j => {
+    const k = j.company.toLowerCase().trim();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).map(j => ({...j, addedAt: new Date().toISOString()}));
 }
 
 async function genCoverLetter(job, resumeText, resumeType) {
@@ -205,6 +207,7 @@ function JobItem({ job, selected, onToggle, onView }) {
           <span style={{background:mc+"20",color:mc,fontSize:11,fontWeight:700,padding:"2px 9px",borderRadius:20}}>{job.matchScore}%</span>
         </div>
         <div style={{color:"#6B7FA8",fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{job.role} · {job.location}</div>
+        {job.postedDate && <div style={{color:"#2A3550",fontSize:11,marginTop:2}}>📅 {job.postedDate}</div>}
       </div>
       <button onClick={e=>{e.stopPropagation();onView(job);}} className="btn"
         style={{background:"rgba(255,255,255,0.06)",color:"#8B9CC8",border:"1px solid rgba(255,255,255,0.08)",padding:"6px 14px",fontSize:12,borderRadius:10,flexShrink:0}}>
@@ -415,6 +418,7 @@ function App() {
   const [resumeText, setResumeText] = useState("");
   const [jobsTab, setJobsTab] = useState("product_manager");
   const [jobs, setJobs] = useState({ product_manager:[], project_manager:[] });
+  const [seenCompanies, setSeenCompanies] = useState({ product_manager:[], project_manager:[] });
   const [selected, setSelected] = useState({ product_manager: new Set(), project_manager: new Set() });
   const [loadingTab, setLoadingTab] = useState(null);
   const [viewJob, setViewJob] = useState(null);
@@ -435,25 +439,40 @@ function App() {
     });
   };
 
-  const handleSearch = async () => {
-    if (files.length === 0) return;
+  const handleSearch = async (isRefresh = false) => {
+    if (files.length === 0 && !resumeText) return;
     setSearchStep("searching");
 
     try {
-      setSearchMsg("📄 Анализирую резюме...");
-      const text = await analyzeResumes(files);
-      setResumeText(text);
+      let text = resumeText;
+      if (!text || !isRefresh) {
+        setSearchMsg("📄 Анализирую резюме...");
+        text = await analyzeResumes(files);
+        setResumeText(text);
+      }
 
-      // Search both types in parallel
-      setSearchMsg("🔍 Ищу вакансии Product Manager...");
-      setLoadingTab("product_manager");
+      setSearchMsg("🔍 Ищу новые вакансии...");
 
       const [pmJobs, pjmJobs] = await Promise.all([
-        searchJobs(text, "product_manager").catch(()=>[]),
-        searchJobs(text, "project_manager").catch(()=>[]),
+        searchJobs(text, "product_manager", seenCompanies.product_manager).catch(()=>[]),
+        searchJobs(text, "project_manager", seenCompanies.project_manager).catch(()=>[]),
       ]);
 
-      setJobs({ product_manager: pmJobs, project_manager: pjmJobs });
+      // Accumulate seen companies to avoid repeats on refresh
+      setSeenCompanies(prev => ({
+        product_manager: [...new Set([...prev.product_manager, ...pmJobs.map(j=>j.company.toLowerCase())])],
+        project_manager: [...new Set([...prev.project_manager, ...pjmJobs.map(j=>j.company.toLowerCase())])],
+      }));
+
+      if (isRefresh) {
+        // Add new jobs to existing list
+        setJobs(prev => ({
+          product_manager: [...prev.product_manager, ...pmJobs],
+          project_manager: [...prev.project_manager, ...pjmJobs],
+        }));
+      } else {
+        setJobs({ product_manager: pmJobs, project_manager: pjmJobs });
+      }
       setLoadingTab(null);
       setSearchStep("results");
     } catch(e) {
@@ -615,9 +634,9 @@ function App() {
                       style={{background:"rgba(255,255,255,0.05)",color:"#6B7FA8",border:"1px solid rgba(255,255,255,0.08)",padding:"7px 14px",fontSize:12}}>
                       ← Изменить резюме
                     </button>
-                    <button onClick={handleSearch} className="btn"
+                    <button onClick={()=>handleSearch(true)} className="btn"
                       style={{background:"rgba(74,158,255,0.1)",color:"#4A9EFF",border:"1px solid rgba(74,158,255,0.2)",padding:"7px 14px",fontSize:12}}>
-                      🔄 Обновить
+                      🔄 Ещё вакансии
                     </button>
                   </div>
                 </div>
